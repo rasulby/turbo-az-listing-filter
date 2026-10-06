@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Turbo.az Listing Filter
 // @namespace    local.turbo-filter
-// @version      1.3.0
+// @version      1.4.0
 // @description  Adds local saved and hidden vehicle filters to Turbo.az listings.
 // @author       Turbo.az Listing Filter contributors
 // @match        https://turbo.az/*
@@ -275,9 +275,73 @@
       star.setAttribute('aria-pressed', String(canSave && savedKeys.has(entryKey(car))));
       // Removing our attribute restores the site's own display behavior.
       card.toggleAttribute('data-turbo-filter-hidden', canHide && matchesHiddenRule(car));
+      applySeenRule(card);
     } catch (error) {
       debug('Skipping unsupported card', error, card);
     }
+  }
+
+  function getSeenStorageKey() {
+    const url = new URL(window.location.href);
+    const parameters = [...url.searchParams].filter(([name]) => name.toLowerCase() !== 'page');
+    parameters.sort(([a, av], [b, bv]) => a < b ? -1 : a > b ? 1 : av < bv ? -1 : av > bv ? 1 : 0);
+    return `turbo-filter:seen:${url.origin}${url.pathname}?${new URLSearchParams(parameters)}`;
+  }
+
+  function readSeenListings(key) {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(key) || '[]');
+      return new Set(Array.isArray(stored) ? stored.filter(id => typeof id === 'string') : []);
+    } catch (error) {
+      debug('Cannot read seen listings', error);
+      return new Set();
+    }
+  }
+
+  const seenStorageKey = getSeenStorageKey();
+  const seenListings = readSeenListings(seenStorageKey);
+  const displayedCards = new Map();
+
+  function writeSeenListings() {
+    try {
+      sessionStorage.setItem(seenStorageKey, JSON.stringify([...seenListings]));
+    } catch (error) {
+      debug('Cannot persist seen listings; deduplication is limited to this page', error);
+    }
+  }
+
+  function isCardVisible(card) {
+    if (!card.isConnected || card.hasAttribute('data-turbo-filter-hidden')
+      || card.hasAttribute('data-turbo-filter-seen')) return false;
+    const style = getComputedStyle(card);
+    return style.visibility !== 'hidden' && style.visibility !== 'collapse'
+      && card.getClientRects().length > 0;
+  }
+
+  function applySeenRule(card) {
+    const identity = getListingIdentity(card);
+    const alreadyShown = identity && seenListings.has(identity) && displayedCards.get(identity) !== card;
+    card.toggleAttribute('data-turbo-filter-seen', Boolean(alreadyShown));
+    if (identity && !seenListings.has(identity) && isCardVisible(card)) {
+      // Keep this instance visible during later filter and observer updates.
+      displayedCards.set(identity, card);
+      seenListings.add(identity);
+      writeSeenListings();
+    }
+  }
+
+  function resetSeenListings() {
+    if (!window.confirm('Reset seen listings for this search?')) return;
+    seenListings.clear();
+    displayedCards.clear();
+    writeSeenListings();
+    refresh();
+  }
+
+  function compareEntries(a, b) {
+    return normalizeModel(a.model).localeCompare(normalizeModel(b.model), undefined, { sensitivity: 'base' })
+      || Number(a.year || 0) - Number(b.year || 0)
+      || Number(a.engine || 0) - Number(b.engine || 0);
   }
 
   const autoFill = {
@@ -290,7 +354,7 @@
     initialized: false,
     hasNext: false,
     container: null,
-    seen: new Set(),
+    presentIds: new Set(),
     candidates: new Map()
   };
 
@@ -326,30 +390,31 @@
     });
   }
 
-  function getListingId(card) {
+  function getListingIdentity(card) {
     const href = card.querySelector('.products-i__link')?.getAttribute('href');
     if (!href) return null;
     try {
       const url = new URL(href, autoFill.url);
-      return url.origin === window.location.origin ? url.pathname.match(/^\/autos\/(\d+)(?:-|$)/)?.[1] || null : null;
+      if (url.origin !== window.location.origin) return null;
+      const path = url.pathname.replace(/\/+$/, '');
+      const id = path.match(/^\/autos\/(\d+)(?:-|$)/)?.[1];
+      return id ? `id:${id}` : /^\/autos\/[^/]+$/.test(path) ? `path:${path}` : null;
     } catch {
       return null;
     }
   }
 
-  function collectSeenListingIds() {
+  function collectPresentListingIds() {
+    autoFill.presentIds.clear();
     document.querySelectorAll(CARD_SELECTOR).forEach(card => {
-      const id = getListingId(card);
-      if (id) autoFill.seen.add(id);
+      const id = getListingIdentity(card);
+      if (id) autoFill.presentIds.add(id);
     });
   }
 
   function getVisibleCards() {
-    return [...document.querySelectorAll(CARD_SELECTOR)].filter(card => {
-      if (card.hasAttribute('data-turbo-filter-hidden') || matchesHiddenRule(readCar(card))) return false;
-      const style = getComputedStyle(card);
-      return style.visibility !== 'hidden' && style.visibility !== 'collapse' && card.getClientRects().length > 0;
-    });
+    return [...document.querySelectorAll(CARD_SELECTOR)].filter(card =>
+      isCardVisible(card) && !matchesHiddenRule(readCar(card)));
   }
 
   async function fetchPageCards(page) {
@@ -373,21 +438,22 @@
   }
 
   function appendMatchingCards() {
-    collectSeenListingIds();
+    collectPresentListingIds();
     let remaining = TARGET_VISIBLE_CARDS - getVisibleCards().length;
     for (const [id, card] of autoFill.candidates) {
       if (remaining <= 0) break;
-      if (autoFill.seen.has(id)) {
+      if (autoFill.presentIds.has(id)) {
         autoFill.candidates.delete(id);
         continue;
       }
-      if (matchesHiddenRule(readCar(card))) continue;
+      if (seenListings.has(id) || matchesHiddenRule(readCar(card))) continue;
       const appended = document.importNode(card, true);
       processCard(appended);
       autoFill.container.append(appended);
-      autoFill.seen.add(id);
+      applySeenRule(appended);
+      autoFill.presentIds.add(id);
       autoFill.candidates.delete(id);
-      remaining--;
+      if (isCardVisible(appended)) remaining--;
     }
   }
 
@@ -414,8 +480,8 @@
         autoFill.page++;
         autoFill.hasNext = result.hasNext && result.cards.length > 0;
         for (const card of result.cards) {
-          const id = getListingId(card);
-          if (id && !autoFill.seen.has(id)) autoFill.candidates.set(id, card);
+          const id = getListingIdentity(card);
+          if (id && !autoFill.presentIds.has(id)) autoFill.candidates.set(id, card);
         }
         // Rules may have changed while the request was in flight.
         appendMatchingCards();
@@ -448,7 +514,7 @@
       const bulk = makeButton(bulkLabel, bulkLabel, () => clearSection(sectionName));
       bulk.disabled = !state[sectionName].length;
       section.append(heading, bulk);
-      for (const entry of state[sectionName]) {
+      for (const entry of [...state[sectionName]].sort(compareEntries)) {
         const row = document.createElement('div');
         const label = document.createElement('span');
         label.textContent = formatEntry(entry);
@@ -472,7 +538,7 @@
   function createPanel() {
     const style = document.createElement('style');
     style.textContent = `
-      .products-i[data-turbo-filter-hidden] { display: none !important; }
+      .products-i[data-turbo-filter-hidden], .products-i[data-turbo-filter-seen] { display: none !important; }
       .products-i[data-turbo-filter-processed] { position: relative; }
       [data-turbo-filter-controls] { position: absolute; top: 6px; left: 6px; z-index: 20; display: flex; gap: 4px; }
       [data-turbo-filter-ui] button { font: 14px sans-serif; color: #222; background: white; border: 1px solid #aaa; border-radius: 4px; padding: 5px 8px; cursor: pointer; }
@@ -500,7 +566,7 @@
     toggle.setAttribute('aria-controls', panelBody.id);
     status = document.createElement('p');
     status.setAttribute('role', 'status');
-    panelBody.append(status);
+    panelBody.append(status, makeButton('Reset Seen', 'Reset seen listings for this search', resetSeenListings));
     panel.append(toggle, panelBody);
     document.body.append(panel);
   }
