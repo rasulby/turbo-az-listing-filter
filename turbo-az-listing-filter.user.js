@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Turbo.az Listing Filter
 // @namespace    local.turbo-filter
-// @version      1.2.0
+// @version      1.3.0
 // @description  Adds local saved and hidden vehicle filters to Turbo.az listings.
 // @author       Turbo.az Listing Filter contributors
 // @match        https://turbo.az/*
@@ -15,6 +15,8 @@
   'use strict';
 
   const DEBUG = false;
+  const TARGET_VISIBLE_CARDS = 20;
+  const MAX_EXTRA_PAGES = 10;
   const STORAGE_KEY = 'turbo-filter:v1';
   const CARD_SELECTOR = '.products-i';
   const OWN_UI = '[data-turbo-filter-ui]';
@@ -278,6 +280,163 @@
     }
   }
 
+  const autoFill = {
+    url: window.location.href,
+    page: getCurrentPageNumber(),
+    checked: 0,
+    running: false,
+    scheduled: false,
+    stopped: false,
+    initialized: false,
+    hasNext: false,
+    container: null,
+    seen: new Set(),
+    candidates: new Map()
+  };
+
+  function getCurrentPageNumber(url = window.location.href) {
+    const page = Number(new URL(url).searchParams.get('page') || 1);
+    return Number.isSafeInteger(page) && page > 0 ? page : 1;
+  }
+
+  function buildPageUrl(page) {
+    const url = new URL(autoFill.url);
+    url.searchParams.set('page', String(page));
+    url.hash = '';
+    return url;
+  }
+
+  function getResultContainer(root) {
+    const pagination = root.querySelector('.pagination');
+    if (!pagination) return null;
+    const containers = [...root.querySelectorAll('.products')].filter(container =>
+      container.compareDocumentPosition(pagination) & Node.DOCUMENT_POSITION_FOLLOWING);
+    return containers.at(-1) || null;
+  }
+
+  function hasNextPage(root, page) {
+    return [...root.querySelectorAll('.pagination a[rel~="next"]')].some(link => {
+      try {
+        const url = new URL(link.getAttribute('href'), autoFill.url);
+        return url.origin === window.location.origin && url.pathname === new URL(autoFill.url).pathname
+          && getCurrentPageNumber(url.href) === page + 1;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  function getListingId(card) {
+    const href = card.querySelector('.products-i__link')?.getAttribute('href');
+    if (!href) return null;
+    try {
+      const url = new URL(href, autoFill.url);
+      return url.origin === window.location.origin ? url.pathname.match(/^\/autos\/(\d+)(?:-|$)/)?.[1] || null : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function collectSeenListingIds() {
+    document.querySelectorAll(CARD_SELECTOR).forEach(card => {
+      const id = getListingId(card);
+      if (id) autoFill.seen.add(id);
+    });
+  }
+
+  function getVisibleCards() {
+    return [...document.querySelectorAll(CARD_SELECTOR)].filter(card => {
+      if (card.hasAttribute('data-turbo-filter-hidden') || matchesHiddenRule(readCar(card))) return false;
+      const style = getComputedStyle(card);
+      return style.visibility !== 'hidden' && style.visibility !== 'collapse' && card.getClientRects().length > 0;
+    });
+  }
+
+  async function fetchPageCards(page) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const url = buildPageUrl(page);
+      const response = await fetch(url.href, { credentials: 'same-origin', signal: controller.signal });
+      if (!response.ok || response.redirected) throw new Error(`Listing fetch failed: ${response.status}`);
+      const root = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const container = getResultContainer(root);
+      // A final page may omit pagination entirely.
+      const results = container || [...root.querySelectorAll('.products')].at(-1);
+      return {
+        cards: results ? [...results.querySelectorAll(CARD_SELECTOR)] : [],
+        hasNext: hasNextPage(root, page)
+      };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function appendMatchingCards() {
+    collectSeenListingIds();
+    let remaining = TARGET_VISIBLE_CARDS - getVisibleCards().length;
+    for (const [id, card] of autoFill.candidates) {
+      if (remaining <= 0) break;
+      if (autoFill.seen.has(id)) {
+        autoFill.candidates.delete(id);
+        continue;
+      }
+      if (matchesHiddenRule(readCar(card))) continue;
+      const appended = document.importNode(card, true);
+      processCard(appended);
+      autoFill.container.append(appended);
+      autoFill.seen.add(id);
+      autoFill.candidates.delete(id);
+      remaining--;
+    }
+  }
+
+  async function autoFillListings() {
+    if (autoFill.running || autoFill.url !== window.location.href) return;
+    if (!autoFill.initialized) {
+      autoFill.container = getResultContainer(document);
+      if (!autoFill.container) return;
+      autoFill.hasNext = hasNextPage(document, autoFill.page);
+      autoFill.initialized = true;
+    }
+    if (!autoFill.container.isConnected) return;
+    autoFill.running = true;
+    try {
+      appendMatchingCards();
+      while (!autoFill.stopped && autoFill.hasNext && autoFill.checked < MAX_EXTRA_PAGES
+        && getVisibleCards().length < TARGET_VISIBLE_CARDS) {
+        autoFill.checked++;
+        const result = await fetchPageCards(autoFill.page + 1);
+        if (autoFill.url !== window.location.href || !autoFill.container.isConnected) {
+          autoFill.stopped = true;
+          break;
+        }
+        autoFill.page++;
+        autoFill.hasNext = result.hasNext && result.cards.length > 0;
+        for (const card of result.cards) {
+          const id = getListingId(card);
+          if (id && !autoFill.seen.has(id)) autoFill.candidates.set(id, card);
+        }
+        // Rules may have changed while the request was in flight.
+        appendMatchingCards();
+      }
+    } catch (error) {
+      autoFill.stopped = true;
+      debug('Auto-fill stopped', error);
+    } finally {
+      autoFill.running = false;
+    }
+  }
+
+  function scheduleAutoFill() {
+    if (autoFill.scheduled || autoFill.running) return;
+    autoFill.scheduled = true;
+    window.setTimeout(() => {
+      autoFill.scheduled = false;
+      void autoFillListings();
+    }, 100);
+  }
+
   function renderPanel() {
     toggle.textContent = `Turbo Filter · Saved (${state.saved.length}) · Hidden (${state.hidden.length})`;
     panelBody.querySelectorAll('section').forEach(section => section.remove());
@@ -307,6 +466,7 @@
     rebuildKeys();
     renderPanel();
     document.querySelectorAll(CARD_SELECTOR).forEach(processCard);
+    scheduleAutoFill();
   }
 
   function createPanel() {
@@ -374,6 +534,7 @@
         const cards = [...pending];
         pending.clear();
         cards.forEach(card => { if (card.isConnected) processCard(card); });
+        scheduleAutoFill();
       });
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
