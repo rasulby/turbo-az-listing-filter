@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Turbo.az Listing Filter
 // @namespace    local.turbo-filter
-// @version      1.4.0
+// @version      1.5.0
 // @description  Adds local saved and hidden vehicle filters to Turbo.az listings.
 // @author       Turbo.az Listing Filter contributors
 // @match        https://turbo.az/*
@@ -15,8 +15,6 @@
   'use strict';
 
   const DEBUG = false;
-  const TARGET_VISIBLE_CARDS = 20;
-  const MAX_EXTRA_PAGES = 10;
   const STORAGE_KEY = 'turbo-filter:v1';
   const CARD_SELECTOR = '.products-i';
   const OWN_UI = '[data-turbo-filter-ui]';
@@ -275,232 +273,15 @@
       star.setAttribute('aria-pressed', String(canSave && savedKeys.has(entryKey(car))));
       // Removing our attribute restores the site's own display behavior.
       card.toggleAttribute('data-turbo-filter-hidden', canHide && matchesHiddenRule(car));
-      applySeenRule(card);
     } catch (error) {
       debug('Skipping unsupported card', error, card);
     }
-  }
-
-  function getSeenStorageKey() {
-    const url = new URL(window.location.href);
-    const parameters = [...url.searchParams].filter(([name]) => name.toLowerCase() !== 'page');
-    parameters.sort(([a, av], [b, bv]) => a < b ? -1 : a > b ? 1 : av < bv ? -1 : av > bv ? 1 : 0);
-    return `turbo-filter:seen:${url.origin}${url.pathname}?${new URLSearchParams(parameters)}`;
-  }
-
-  function readSeenListings(key) {
-    try {
-      const stored = JSON.parse(sessionStorage.getItem(key) || '[]');
-      return new Set(Array.isArray(stored) ? stored.filter(id => typeof id === 'string') : []);
-    } catch (error) {
-      debug('Cannot read seen listings', error);
-      return new Set();
-    }
-  }
-
-  const seenStorageKey = getSeenStorageKey();
-  const seenListings = readSeenListings(seenStorageKey);
-  const displayedCards = new Map();
-
-  function writeSeenListings() {
-    try {
-      sessionStorage.setItem(seenStorageKey, JSON.stringify([...seenListings]));
-    } catch (error) {
-      debug('Cannot persist seen listings; deduplication is limited to this page', error);
-    }
-  }
-
-  function isCardVisible(card) {
-    if (!card.isConnected || card.hasAttribute('data-turbo-filter-hidden')
-      || card.hasAttribute('data-turbo-filter-seen')) return false;
-    const style = getComputedStyle(card);
-    return style.visibility !== 'hidden' && style.visibility !== 'collapse'
-      && card.getClientRects().length > 0;
-  }
-
-  function applySeenRule(card) {
-    const identity = getListingIdentity(card);
-    const alreadyShown = identity && seenListings.has(identity) && displayedCards.get(identity) !== card;
-    card.toggleAttribute('data-turbo-filter-seen', Boolean(alreadyShown));
-    if (identity && !seenListings.has(identity) && isCardVisible(card)) {
-      // Keep this instance visible during later filter and observer updates.
-      displayedCards.set(identity, card);
-      seenListings.add(identity);
-      writeSeenListings();
-    }
-  }
-
-  function resetSeenListings() {
-    if (!window.confirm('Reset seen listings for this search?')) return;
-    seenListings.clear();
-    displayedCards.clear();
-    writeSeenListings();
-    refresh();
   }
 
   function compareEntries(a, b) {
     return normalizeModel(a.model).localeCompare(normalizeModel(b.model), undefined, { sensitivity: 'base' })
       || Number(a.year || 0) - Number(b.year || 0)
       || Number(a.engine || 0) - Number(b.engine || 0);
-  }
-
-  const autoFill = {
-    url: window.location.href,
-    page: getCurrentPageNumber(),
-    checked: 0,
-    running: false,
-    scheduled: false,
-    stopped: false,
-    initialized: false,
-    hasNext: false,
-    container: null,
-    presentIds: new Set(),
-    candidates: new Map()
-  };
-
-  function getCurrentPageNumber(url = window.location.href) {
-    const page = Number(new URL(url).searchParams.get('page') || 1);
-    return Number.isSafeInteger(page) && page > 0 ? page : 1;
-  }
-
-  function buildPageUrl(page) {
-    const url = new URL(autoFill.url);
-    url.searchParams.set('page', String(page));
-    url.hash = '';
-    return url;
-  }
-
-  function getResultContainer(root) {
-    const pagination = root.querySelector('.pagination');
-    if (!pagination) return null;
-    const containers = [...root.querySelectorAll('.products')].filter(container =>
-      container.compareDocumentPosition(pagination) & Node.DOCUMENT_POSITION_FOLLOWING);
-    return containers.at(-1) || null;
-  }
-
-  function hasNextPage(root, page) {
-    return [...root.querySelectorAll('.pagination a[rel~="next"]')].some(link => {
-      try {
-        const url = new URL(link.getAttribute('href'), autoFill.url);
-        return url.origin === window.location.origin && url.pathname === new URL(autoFill.url).pathname
-          && getCurrentPageNumber(url.href) === page + 1;
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  function getListingIdentity(card) {
-    const href = card.querySelector('.products-i__link')?.getAttribute('href');
-    if (!href) return null;
-    try {
-      const url = new URL(href, autoFill.url);
-      if (url.origin !== window.location.origin) return null;
-      const path = url.pathname.replace(/\/+$/, '');
-      const id = path.match(/^\/autos\/(\d+)(?:-|$)/)?.[1];
-      return id ? `id:${id}` : /^\/autos\/[^/]+$/.test(path) ? `path:${path}` : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function collectPresentListingIds() {
-    autoFill.presentIds.clear();
-    document.querySelectorAll(CARD_SELECTOR).forEach(card => {
-      const id = getListingIdentity(card);
-      if (id) autoFill.presentIds.add(id);
-    });
-  }
-
-  function getVisibleCards() {
-    return [...document.querySelectorAll(CARD_SELECTOR)].filter(card =>
-      isCardVisible(card) && !matchesHiddenRule(readCar(card)));
-  }
-
-  async function fetchPageCards(page) {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 15000);
-    try {
-      const url = buildPageUrl(page);
-      const response = await fetch(url.href, { credentials: 'same-origin', signal: controller.signal });
-      if (!response.ok || response.redirected) throw new Error(`Listing fetch failed: ${response.status}`);
-      const root = new DOMParser().parseFromString(await response.text(), 'text/html');
-      const container = getResultContainer(root);
-      // A final page may omit pagination entirely.
-      const results = container || [...root.querySelectorAll('.products')].at(-1);
-      return {
-        cards: results ? [...results.querySelectorAll(CARD_SELECTOR)] : [],
-        hasNext: hasNextPage(root, page)
-      };
-    } finally {
-      window.clearTimeout(timeout);
-    }
-  }
-
-  function appendMatchingCards() {
-    collectPresentListingIds();
-    let remaining = TARGET_VISIBLE_CARDS - getVisibleCards().length;
-    for (const [id, card] of autoFill.candidates) {
-      if (remaining <= 0) break;
-      if (autoFill.presentIds.has(id)) {
-        autoFill.candidates.delete(id);
-        continue;
-      }
-      if (seenListings.has(id) || matchesHiddenRule(readCar(card))) continue;
-      const appended = document.importNode(card, true);
-      processCard(appended);
-      autoFill.container.append(appended);
-      applySeenRule(appended);
-      autoFill.presentIds.add(id);
-      autoFill.candidates.delete(id);
-      if (isCardVisible(appended)) remaining--;
-    }
-  }
-
-  async function autoFillListings() {
-    if (autoFill.running || autoFill.url !== window.location.href) return;
-    if (!autoFill.initialized) {
-      autoFill.container = getResultContainer(document);
-      if (!autoFill.container) return;
-      autoFill.hasNext = hasNextPage(document, autoFill.page);
-      autoFill.initialized = true;
-    }
-    if (!autoFill.container.isConnected) return;
-    autoFill.running = true;
-    try {
-      appendMatchingCards();
-      while (!autoFill.stopped && autoFill.hasNext && autoFill.checked < MAX_EXTRA_PAGES
-        && getVisibleCards().length < TARGET_VISIBLE_CARDS) {
-        autoFill.checked++;
-        const result = await fetchPageCards(autoFill.page + 1);
-        if (autoFill.url !== window.location.href || !autoFill.container.isConnected) {
-          autoFill.stopped = true;
-          break;
-        }
-        autoFill.page++;
-        autoFill.hasNext = result.hasNext && result.cards.length > 0;
-        for (const card of result.cards) {
-          const id = getListingIdentity(card);
-          if (id && !autoFill.presentIds.has(id)) autoFill.candidates.set(id, card);
-        }
-        // Rules may have changed while the request was in flight.
-        appendMatchingCards();
-      }
-    } catch (error) {
-      autoFill.stopped = true;
-      debug('Auto-fill stopped', error);
-    } finally {
-      autoFill.running = false;
-    }
-  }
-
-  function scheduleAutoFill() {
-    if (autoFill.scheduled || autoFill.running) return;
-    autoFill.scheduled = true;
-    window.setTimeout(() => {
-      autoFill.scheduled = false;
-      void autoFillListings();
-    }, 100);
   }
 
   function renderPanel() {
@@ -532,13 +313,12 @@
     rebuildKeys();
     renderPanel();
     document.querySelectorAll(CARD_SELECTOR).forEach(processCard);
-    scheduleAutoFill();
   }
 
   function createPanel() {
     const style = document.createElement('style');
     style.textContent = `
-      .products-i[data-turbo-filter-hidden], .products-i[data-turbo-filter-seen] { display: none !important; }
+      .products-i[data-turbo-filter-hidden] { display: none !important; }
       .products-i[data-turbo-filter-processed] { position: relative; }
       [data-turbo-filter-controls] { position: absolute; top: 6px; left: 6px; z-index: 20; display: flex; gap: 4px; }
       [data-turbo-filter-ui] button { font: 14px sans-serif; color: #222; background: white; border: 1px solid #aaa; border-radius: 4px; padding: 5px 8px; cursor: pointer; }
@@ -566,7 +346,7 @@
     toggle.setAttribute('aria-controls', panelBody.id);
     status = document.createElement('p');
     status.setAttribute('role', 'status');
-    panelBody.append(status, makeButton('Reset Seen', 'Reset seen listings for this search', resetSeenListings));
+    panelBody.append(status);
     panel.append(toggle, panelBody);
     document.body.append(panel);
   }
@@ -600,7 +380,6 @@
         const cards = [...pending];
         pending.clear();
         cards.forEach(card => { if (card.isConnected) processCard(card); });
-        scheduleAutoFill();
       });
     });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });

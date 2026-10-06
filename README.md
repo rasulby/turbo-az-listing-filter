@@ -27,34 +27,23 @@ Alternatively, choose **Create a new script** in Violentmonkey, replace the star
   | Toyota Prius — 2012 | All Toyota Prius 2012 listings, regardless of engine |
   | Toyota Prius — 2012 — 1.8 | Only Toyota Prius 2012 listings with a normalized 1.8-liter engine |
 
-- Listings already displayed in the same tab and search are skipped on later pages, including direct page jumps. Only displayed cards count as seen.
 - Saved and Hidden entries are displayed alphabetically; matching models sort by year and engine, with broader rules first.
-- **Reset Seen** clears the current search’s temporary history after confirmation and re-evaluates the page. Saved and Hidden preferences are unaffected.
 - Broader rules replace redundant narrower rules. Duplicate or already-covered rules are not added.
 - The floating **Turbo Filter** panel offers individual **Remove** and **Restore**, plus confirmed **Remove All** and **Restore All** actions. Saved and Hidden lists are managed independently.
 - Filters apply immediately to loaded cards and automatically to new cards during infinite scrolling. Restoring a rule re-evaluates loaded cards without a reload.
-- On paginated result pages, auto-fill pulls matching listings from subsequent pages when fewer than 20 cards remain visible. Search parameters and native pagination are preserved.
 - Missing fields disable only the affected options. A Brand + Model rule can still match cards with no year or engine. Battery capacity is not treated as engine displacement.
 
+The script operates only on the currently loaded page. It makes no requests for additional pages and leaves native pagination unchanged.
+
 The menu closes after selection, on an outside click, or with Escape. There is no individual-advertisement saving or hiding.
-
-## Auto-fill
-
-`TARGET_VISIBLE_CARDS` (default **20**) and `MAX_EXTRA_PAGES` (default **10**) near the top of the script control auto-fill. Only one same-origin request runs at a time. Fetching stops at the target, the cumulative page limit for this page load, the end of results, or a failed request. Requests time out after 15 seconds.
-
-Changing Hidden rules re-evaluates the loaded cards and refills as needed within the remaining limit. Fetched cards use the same filters and ★/🚫 controls. Extra and currently filtered candidates stay in memory for reuse after rule changes; only matching cards are appended. Pages without native result pagination are left alone.
 
 ## Storage and matching
 
 Saved and Hidden preferences stay in browser `localStorage` under the existing `turbo-filter:v1` key. There is no backend, account, cloud storage, external synchronization, analytics, or telemetry. Data is separate per browser profile and Turbo.az origin; clearing site data removes it.
 
-Turbo.az's dedicated vehicle-name field contains the brand and model together. The script retains that full name instead of guessing how to split multiword brands. Matching normalizes casing, whitespace, and decimal engine values. `Toyota Prius` does not match `Toyota Corolla`. Advertisement IDs (or canonical listing paths when needed) are kept separately in `sessionStorage` to prevent repeated advertisements. They are never stored as Saved or Hidden rules.
+Turbo.az's dedicated vehicle-name field contains the brand and model together. The script retains that full name instead of guessing how to split multiword brands. Matching normalizes casing, whitespace, and decimal engine values. `Toyota Prius` does not match `Toyota Corolla`. Advertisement IDs and URLs are not stored or used as filter rules.
 
-Saved entries contain `model` (the full brand/model name) and `year`. Hidden entries contain `model`, optionally `year`, and optionally `engine` when a year is present. Older stored rules remain compatible. Auto-fill does not write, migrate, or reset Saved or Hidden data.
-
-Seen history is scoped to the URL path and sorted search parameters, excluding `page`. Different filters get separate histories; page jumps, refreshes, and back navigation retain the current search history. Closing the tab ends the session. Fetched but unused listings and cards excluded by Hidden rules are not marked seen. Already displayed cards remain visible during updates on the current page.
-
-**Reset Seen** affects only the current search. After reset, eligible cards on the current page become visible and are recorded as seen again. No Saved or Hidden data is changed. If session storage is unavailable, deduplication continues in memory for the current page.
+Saved entries contain `model` (the full brand/model name) and `year`. Hidden entries contain `model`, optionally `year`, and optionally `engine` when a year is present. Older stored rules remain compatible. Updating the script does not migrate or reset Saved or Hidden data.
 
 Set `DEBUG` to `true` near the top of the script for console diagnostics.
 
